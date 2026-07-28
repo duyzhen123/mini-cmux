@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Unrelated local scratch files kept outside the mini-cmux repository history.
+/PLAN.md
+/calculator.py
+/test_calculator.py

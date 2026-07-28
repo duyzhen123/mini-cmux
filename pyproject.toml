@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-cmux"
+version = "0.1.0"
+description = "A lightweight tmux control plane for coding-agent workflows"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/duyzhen123/mini-cmux"
+Repository = "https://github.com/duyzhen123/mini-cmux.git"
+Issues = "https://github.com/duyzhen123/mini-cmux/issues"
+
+[project.scripts]
+mini-cmux = "mini_cmux.cli:main"
+
+[tool.setuptools]
+packages = ["mini_cmux"]
