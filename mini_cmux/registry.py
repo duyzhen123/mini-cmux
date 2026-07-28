@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import tempfile
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,8 @@ def utc_now() -> str:
 def default_state() -> Dict[str, Any]:
     return {
         "version": 1,
+        "stream_id": str(uuid.uuid4()),
+        "next_event_seq": 1,
         "projects": {},
         "agents": {},
         "events": [],
@@ -69,6 +72,18 @@ class Registry:
         state.setdefault("projects", {})
         state.setdefault("agents", {})
         state.setdefault("events", [])
+        state.setdefault("stream_id", str(uuid.uuid4()))
+        next_sequence = 1
+        for event in state["events"]:
+            if not event.get("seq"):
+                event["seq"] = next_sequence
+            next_sequence = max(next_sequence, event["seq"] + 1)
+            event.setdefault("stream_id", state["stream_id"])
+            event.setdefault("category", "agent")
+            event.setdefault("payload", {})
+        state["next_event_seq"] = max(
+            int(state.get("next_event_seq") or 1), next_sequence
+        )
         return state
 
     def read(self) -> Dict[str, Any]:
@@ -104,8 +119,12 @@ class Registry:
         """Append while called from a mutate callback holding the registry lock."""
         state["events"].append(event)
         state["events"] = state["events"][-2000:]
+        if self.events_path.exists() and self.events_path.stat().st_size >= 16 * 1024 * 1024:
+            rotated = self.events_path.with_name(self.events_path.name + ".1")
+            if rotated.exists():
+                rotated.unlink()
+            os.replace(self.events_path, rotated)
         with self.events_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, sort_keys=True))
             handle.write("\n")
             handle.flush()
-

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shlex
+import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -34,6 +37,21 @@ IMPORTANT_EVENTS = {
     "review_red",
     "timeout",
     "session_lost",
+    "notification",
+}
+EVENT_CATEGORIES = {
+    "agent_started": "agent",
+    "agent_working": "agent",
+    "agent_idle": "agent",
+    "agent_waiting_for_input": "attention",
+    "agent_completed": "attention",
+    "agent_failed": "attention",
+    "process_exited": "lifecycle",
+    "review_green": "attention",
+    "review_red": "attention",
+    "timeout": "attention",
+    "session_lost": "lifecycle",
+    "notification": "notification",
 }
 
 
@@ -100,9 +118,14 @@ class Controller:
         message: str,
         project: Dict[str, Any],
         agent: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        sequence = state["next_event_seq"]
+        state["next_event_seq"] += 1
         event = {
             "id": str(uuid.uuid4()),
+            "seq": sequence,
+            "stream_id": state["stream_id"],
             "timestamp": utc_now(),
             "project_id": project["id"],
             "project_name": project["name"],
@@ -111,7 +134,9 @@ class Controller:
             "role": agent["role"] if agent else None,
             "tmux_target": agent.get("tmux_target") if agent else None,
             "type": event_type,
+            "category": EVENT_CATEGORIES.get(event_type, "agent"),
             "message": message,
+            "payload": payload or {},
             "read_state": "unread",
             "acknowledged_at": None,
         }
@@ -130,6 +155,7 @@ class Controller:
             "review_red": "Review failed",
             "timeout": "Agent wait timed out",
             "session_lost": "Agent session lost",
+            "notification": "mini-cmux",
         }
         for event in events:
             if event["type"] not in IMPORTANT_EVENTS:
@@ -147,7 +173,10 @@ class Controller:
             body = "{} / {}: {}".format(
                 event["project_name"], agent_name or "project", event["message"]
             )
-            self.notifier.send(titles.get(event["type"], "mini-cmux"), body, action)
+            title = event.get("payload", {}).get("title") or titles.get(
+                event["type"], "mini-cmux"
+            )
+            self.notifier.send(title, body, action)
 
     def create_project(self, name: str, cwd: str) -> Dict[str, Any]:
         path = Path(cwd).expanduser().resolve()
@@ -246,6 +275,9 @@ class Controller:
         if not agent_cwd.is_dir():
             raise MiniCmuxError("Agent cwd is not a directory: {}".format(agent_cwd))
         agent_id = str(uuid.uuid4())
+        output_directory = self.registry.home / "output"
+        output_directory.mkdir(parents=True, exist_ok=True)
+        output_log = output_directory / "{}.log".format(agent_id)
         pane = self.tmux.create_agent_pane(
             project["tmux_session"],
             project["id"],
@@ -254,6 +286,7 @@ class Controller:
             role,
             str(agent_cwd),
             command,
+            str(output_log),
         )
         pane_info = next(
             (
@@ -280,6 +313,8 @@ class Controller:
             "status": "running",
             "last_marker": None,
             "marker_counts": {},
+            "output_log": str(output_log),
+            "output_offset": 0,
             "last_activity_at": now,
             "last_exit_status": None,
             "exit_reported": False,
@@ -431,6 +466,110 @@ class Controller:
 
         return self.registry.mutate(stop)
 
+    def restart_agent(
+        self, name: str, project_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        agent, project = self._resolve_agent(name, project_name, reconcile=False)
+        if not self.tmux.session_exists(project["tmux_session"]):
+            raise MiniCmuxError(
+                "tmux session {} is missing; recreate the project first".format(
+                    project["tmux_session"]
+                )
+            )
+        panes = self.tmux.list_panes(project["tmux_session"])
+        pane = next(
+            (
+                item
+                for item in panes
+                if item.get("agent_id") == agent["id"]
+                or item["pane_id"] == agent.get("tmux_pane")
+            ),
+            None,
+        )
+        output_log = agent.get("output_log")
+        if pane:
+            self.tmux.restart_agent_pane(
+                pane["pane_id"],
+                project["id"],
+                agent["id"],
+                agent["name"],
+                agent["role"],
+                agent["cwd"],
+                agent["command"],
+                output_log,
+            )
+            pane_id = pane["pane_id"]
+        else:
+            pane_id = self.tmux.create_agent_pane(
+                project["tmux_session"],
+                project["id"],
+                agent["id"],
+                agent["name"],
+                agent["role"],
+                agent["cwd"],
+                agent["command"],
+                output_log,
+            )
+        pane_info = next(
+            (
+                item
+                for item in self.tmux.list_panes(project["tmux_session"])
+                if item["pane_id"] == pane_id
+            ),
+            None,
+        )
+        emitted: List[Dict[str, Any]] = []
+
+        def restart(state: Dict[str, Any]) -> Dict[str, Any]:
+            current = state["agents"][agent["id"]]
+            current["tmux_pane"] = pane_id
+            current["tmux_window"] = (
+                pane_info["window"] if pane_info else current.get("tmux_window")
+            )
+            current["tmux_target"] = (
+                pane_info["target"] if pane_info else pane_id
+            )
+            current["pid"] = pane_info["pid"] if pane_info else None
+            current["status"] = "running"
+            current["last_exit_status"] = None
+            current["exit_reported"] = False
+            current["session_lost_reported"] = False
+            current["attention_required"] = False
+            current["updated_at"] = utc_now()
+            emitted.append(
+                self._event_in_state(
+                    state,
+                    "agent_started",
+                    "{} restarted".format(current["name"]),
+                    state["projects"][current["project_id"]],
+                    current,
+                    payload={"restart": True},
+                )
+            )
+            return dict(current)
+
+        restarted = self.registry.mutate(restart)
+        self._notify_events(emitted)
+        return restarted
+
+    @staticmethod
+    def _read_incremental_output(agent: Dict[str, Any]) -> Tuple[str, int]:
+        output_log = agent.get("output_log")
+        old_offset = int(agent.get("output_offset") or 0)
+        if not output_log:
+            return "", old_offset
+        path = Path(output_log)
+        try:
+            size = path.stat().st_size
+            offset = old_offset if old_offset <= size else 0
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                data = handle.read(4 * 1024 * 1024)
+                new_offset = handle.tell()
+        except OSError:
+            return "", old_offset
+        return data.decode("utf-8", errors="replace"), new_offset
+
     def reconcile(self) -> List[Dict[str, Any]]:
         """Repair tmux targets and turn markers/process state into events."""
         state = self.registry.read()
@@ -478,10 +617,16 @@ class Controller:
                     capture = self.tmux.capture(pane["pane_id"], 250)
                 except TmuxError:
                     pass
+                incremental_output, new_output_offset = (
+                    self._read_incremental_output(agent)
+                )
                 observations[agent["id"]] = {
                     "missing": False,
                     "pane": pane,
-                    "markers": all_markers(capture),
+                    "capture_markers": all_markers(capture),
+                    "incremental_markers": all_markers(incremental_output),
+                    "output_offset": new_output_offset,
+                    "had_incremental_output": bool(incremental_output),
                 }
 
         emitted: List[Dict[str, Any]] = []
@@ -568,18 +713,27 @@ class Controller:
                 agent["tmux_target"] = pane["target"]
                 agent["pid"] = pane["pid"]
                 agent["session_lost_reported"] = False
+                agent["output_offset"] = observation.get(
+                    "output_offset", agent.get("output_offset", 0)
+                )
                 marker_occurrences: Dict[str, int] = {}
                 previous_counts = agent.get("marker_counts", {})
-                new_markers = []
-                for marker in observation.get("markers", []):
+                capture_new_markers = []
+                for marker in observation.get("capture_markers", []):
                     raw = marker["raw"]
                     marker_occurrences[raw] = marker_occurrences.get(raw, 0) + 1
                     if marker_occurrences[raw] > previous_counts.get(raw, 0):
-                        new_markers.append(marker)
+                        capture_new_markers.append(marker)
                 updated_counts = dict(previous_counts)
                 for raw, count in marker_occurrences.items():
                     updated_counts[raw] = max(count, previous_counts.get(raw, 0))
                 agent["marker_counts"] = updated_counts
+                incremental_markers = observation.get("incremental_markers", [])
+                new_markers = (
+                    incremental_markers
+                    if observation.get("had_incremental_output")
+                    else capture_new_markers
+                )
                 for marker in new_markers:
                     interpreted = interpret_marker(marker)
                     agent["last_marker"] = marker["raw"]
@@ -648,7 +802,10 @@ class Controller:
         self,
         project_name: Optional[str] = None,
         agent_name: Optional[str] = None,
-        after: Optional[str] = None,
+        after_seq: Optional[int] = None,
+        event_types: Optional[Iterable[str]] = None,
+        unread_only: bool = False,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         self.reconcile()
         state = self.registry.read()
@@ -660,13 +817,332 @@ class Controller:
             if agent_name
             else None
         )
-        return [
+        accepted_types = set(event_types or [])
+        events = [
             event
             for event in state["events"]
             if (project_id is None or event["project_id"] == project_id)
             and (agent_id is None or event["agent_id"] == agent_id)
-            and (after is None or event["timestamp"] > after)
+            and (after_seq is None or event.get("seq", 0) > after_seq)
+            and (not accepted_types or event["type"] in accepted_types)
+            and (not unread_only or event["read_state"] == "unread")
         ]
+        if limit is not None:
+            events = events[-max(0, limit) :]
+        return events
+
+    def event_cursor_info(self, after_seq: int) -> Dict[str, Any]:
+        state = self.registry.read()
+        sequences = [
+            event.get("seq", 0) for event in state["events"] if event.get("seq")
+        ]
+        oldest = min(sequences) if sequences else None
+        latest = max(sequences) if sequences else 0
+        return {
+            "stream_id": state["stream_id"],
+            "requested_after_seq": after_seq,
+            "oldest_seq": oldest,
+            "latest_seq": latest,
+            "next_seq": state["next_event_seq"],
+            "gap": bool(
+                after_seq
+                and oldest is not None
+                and after_seq < oldest - 1
+            ),
+        }
+
+    def record_hook(
+        self,
+        status: str,
+        message: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        project_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        identifier = agent_name or os.environ.get("MINI_CMUX_AGENT_ID")
+        project_identifier = project_name or os.environ.get("MINI_CMUX_PROJECT_ID")
+        if not identifier:
+            raise MiniCmuxError(
+                "hook requires --agent outside a mini-cmux managed pane"
+            )
+        state = self.registry.read()
+        agent = self._agent_by_name(state, identifier, project_identifier)
+        project = state["projects"][agent["project_id"]]
+        normalized = status.lower().replace("-", "_")
+        aliases = {
+            "done": "completed",
+            "waiting": "waiting_for_input",
+            "needs_input": "waiting_for_input",
+            "green": "review_green",
+            "red": "review_red",
+        }
+        normalized = aliases.get(normalized, normalized)
+        event_mapping = {
+            "started": ("running", "agent_started"),
+            "running": ("running", "agent_started"),
+            "working": ("working", "agent_working"),
+            "ready": ("ready", "agent_idle"),
+            "idle": ("idle", "agent_idle"),
+            "waiting_for_input": (
+                "waiting_for_input",
+                "agent_waiting_for_input",
+            ),
+            "completed": ("completed", "agent_completed"),
+            "failed": ("failed", "agent_failed"),
+            "review_green": ("review_green", "review_green"),
+            "review_red": ("review_red", "review_red"),
+        }
+        if normalized not in event_mapping:
+            raise MiniCmuxError(
+                "Unsupported hook status {!r}; expected one of {}".format(
+                    status, ", ".join(sorted(event_mapping))
+                )
+            )
+        agent_status, event_type = event_mapping[normalized]
+        emitted: List[Dict[str, Any]] = []
+
+        def record(current: Dict[str, Any]) -> Dict[str, Any]:
+            current_agent = current["agents"][agent["id"]]
+            current_project = current["projects"][project["id"]]
+            current_agent["status"] = agent_status
+            current_agent["last_activity_at"] = utc_now()
+            current_agent["updated_at"] = utc_now()
+            if session_id:
+                current_agent["native_session_id"] = session_id
+            hook_message = message or "{} reported {}".format(
+                current_agent["name"], normalized
+            )
+            emitted.append(
+                self._event_in_state(
+                    current,
+                    event_type,
+                    hook_message,
+                    current_project,
+                    current_agent,
+                    payload={
+                        "source": "hook",
+                        "status": normalized,
+                        "session_id": session_id,
+                    },
+                )
+            )
+            return dict(current_agent)
+
+        updated = self.registry.mutate(record)
+        self._notify_events(emitted)
+        return {"agent": updated, "event": emitted[0]}
+
+    def notify(
+        self,
+        title: str,
+        body: str,
+        agent_name: Optional[str] = None,
+        project_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        identifier = agent_name or os.environ.get("MINI_CMUX_AGENT_ID")
+        project_identifier = project_name or os.environ.get("MINI_CMUX_PROJECT_ID")
+        state = self.registry.read()
+        agent = (
+            self._agent_by_name(state, identifier, project_identifier)
+            if identifier
+            else None
+        )
+        project = (
+            state["projects"][agent["project_id"]]
+            if agent
+            else self._project_by_name(state, project_identifier)
+            if project_identifier
+            else None
+        )
+        if project is None:
+            raise MiniCmuxError(
+                "notify requires --project or a mini-cmux managed pane"
+            )
+        emitted: List[Dict[str, Any]] = []
+
+        def record(current: Dict[str, Any]) -> None:
+            current_project = current["projects"][project["id"]]
+            current_agent = current["agents"].get(agent["id"]) if agent else None
+            emitted.append(
+                self._event_in_state(
+                    current,
+                    "notification",
+                    body,
+                    current_project,
+                    current_agent,
+                    payload={"title": title, "body": body, "source": "manual"},
+                )
+            )
+
+        self.registry.mutate(record)
+        self._notify_events(emitted)
+        return emitted[0]
+
+    def attention_events(
+        self,
+        project_name: Optional[str] = None,
+        agent_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return [
+            event
+            for event in self.events(
+                project_name=project_name,
+                agent_name=agent_name,
+                unread_only=True,
+            )
+            if event["type"] in IMPORTANT_EVENTS
+        ]
+
+    def acknowledge_events(
+        self,
+        event_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        project_name: Optional[str] = None,
+        acknowledge_all: bool = False,
+    ) -> int:
+        if not any([event_id, agent_name, acknowledge_all]):
+            raise MiniCmuxError("ack requires --id, --agent, or --all")
+        state = self.registry.read()
+        project_id = (
+            self._project_by_name(state, project_name)["id"] if project_name else None
+        )
+        agent_id = (
+            self._agent_by_name(state, agent_name, project_name)["id"]
+            if agent_name
+            else None
+        )
+        now = utc_now()
+
+        def acknowledge(current: Dict[str, Any]) -> int:
+            changed = 0
+            for event in current["events"]:
+                matches = event_id is not None and event["id"] == event_id
+                if event_id is None and event["type"] in IMPORTANT_EVENTS:
+                    matches = (
+                        (agent_id is not None and event.get("agent_id") == agent_id)
+                        or (
+                            acknowledge_all
+                            and (
+                                project_id is None
+                                or event["project_id"] == project_id
+                            )
+                        )
+                    )
+                if matches and not event.get("acknowledged_at"):
+                    event["acknowledged_at"] = now
+                    event["read_state"] = "read"
+                    changed += 1
+            for current_agent in current["agents"].values():
+                current_agent["attention_required"] = any(
+                    event["read_state"] == "unread"
+                    and event.get("agent_id") == current_agent["id"]
+                    and event["type"] in IMPORTANT_EVENTS
+                    for event in current["events"]
+                )
+            return changed
+
+        return self.registry.mutate(acknowledge)
+
+    def latest_attention(
+        self, project_name: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        events = self.attention_events(project_name=project_name)
+        return max(events, key=lambda event: event.get("seq", 0)) if events else None
+
+    def capabilities(self) -> Dict[str, Any]:
+        return {
+            "protocol_version": 1,
+            "presentation": "ghostty-manual",
+            "runtime": "tmux",
+            "registry": "atomic-json",
+            "features": {
+                "stable_agent_ids": True,
+                "send_text": True,
+                "send_keys": ["enter", "escape", "ctrl-c"],
+                "bounded_capture": True,
+                "incremental_output_pipe": True,
+                "structured_hooks": True,
+                "event_sequence": True,
+                "event_cursor": True,
+                "attention_queue": True,
+                "native_notifications": platform.system() == "Darwin",
+                "agent_restart": True,
+                "workflow": ["planner", "implementer", "verifier"],
+                "custom_terminal_ui": False,
+                "browser": False,
+                "remote_workers": False,
+            },
+        }
+
+    def doctor(self) -> Dict[str, Any]:
+        checks = []
+        try:
+            tmux_version = self.tmux.version()
+            checks.append(
+                {"name": "tmux", "status": "ok", "detail": tmux_version}
+            )
+        except TmuxError as exc:
+            checks.append(
+                {"name": "tmux", "status": "error", "detail": str(exc)}
+            )
+        ghostty_cli = shutil.which("ghostty")
+        ghostty_candidates = [
+            "/Applications/Ghostty.app",
+            str(Path.home() / "Applications/Ghostty.app"),
+            ghostty_cli
+            if ghostty_cli and "/cmux.app/" not in ghostty_cli.lower()
+            else None,
+        ]
+        ghostty = next(
+            (candidate for candidate in ghostty_candidates if candidate and Path(candidate).exists()),
+            None,
+        )
+        checks.append(
+            {
+                "name": "ghostty",
+                "status": "ok" if ghostty else "warning",
+                "detail": ghostty
+                or (
+                    "only cmux-bundled ghostty CLI detected; "
+                    "standalone Ghostty.app not found"
+                    if ghostty_cli
+                    else "not detected; manual display layer still supported"
+                ),
+            }
+        )
+        try:
+            self.registry.home.mkdir(parents=True, exist_ok=True)
+            writable = os.access(str(self.registry.home), os.W_OK)
+        except OSError:
+            writable = False
+        checks.append(
+            {
+                "name": "registry",
+                "status": "ok" if writable else "error",
+                "detail": str(self.registry.home),
+            }
+        )
+        state = self.registry.read()
+        checks.append(
+            {
+                "name": "state",
+                "status": "ok",
+                "detail": "{} projects, {} agents, {} unread".format(
+                    len(state["projects"]),
+                    len(state["agents"]),
+                    sum(
+                        event["read_state"] == "unread"
+                        for event in state["events"]
+                    ),
+                ),
+            }
+        )
+        return {
+            "ok": not any(check["status"] == "error" for check in checks),
+            "platform": platform.platform(),
+            "python": sys.version.split()[0],
+            "checks": checks,
+        }
 
     def wait(
         self,

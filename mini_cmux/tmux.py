@@ -84,6 +84,9 @@ class Tmux:
     def session_exists(self, session: str) -> bool:
         return self.run("has-session", "-t", session, check=False).returncode == 0
 
+    def version(self) -> str:
+        return self.run("-V").stdout.strip()
+
     def create_session(self, session: str, cwd: str, project_id: str) -> str:
         result = self.run(
             "new-session",
@@ -133,20 +136,11 @@ class Tmux:
         role: str,
         cwd: str,
         command: str,
+        output_log: Optional[str] = None,
     ) -> str:
         window = self.window_for_role(role)
-        shell = os.environ.get("SHELL") or "/bin/sh"
-        pane_command = shlex.join(
-            [
-                "env",
-                "MINI_CMUX_PROJECT_ID={}".format(project_id),
-                "MINI_CMUX_AGENT_ID={}".format(agent_id),
-                "MINI_CMUX_AGENT_NAME={}".format(name),
-                "MINI_CMUX_AGENT_ROLE={}".format(role),
-                shell,
-                "-lc",
-                command,
-            ]
+        pane_command = self._agent_command(
+            project_id, agent_id, name, role, command
         )
         common = ["-d", "-P", "-F", "#{pane_id}", "-c", cwd]
         if window in self.window_names(session):
@@ -168,6 +162,41 @@ class Tmux:
                 pane_command,
             )
         pane = result.stdout.strip()
+        self._configure_agent_pane(
+            pane, project_id, agent_id, name, output_log=output_log
+        )
+        return pane
+
+    @staticmethod
+    def _agent_command(
+        project_id: str,
+        agent_id: str,
+        name: str,
+        role: str,
+        command: str,
+    ) -> str:
+        shell = os.environ.get("SHELL") or "/bin/sh"
+        return shlex.join(
+            [
+                "env",
+                "MINI_CMUX_PROJECT_ID={}".format(project_id),
+                "MINI_CMUX_AGENT_ID={}".format(agent_id),
+                "MINI_CMUX_AGENT_NAME={}".format(name),
+                "MINI_CMUX_AGENT_ROLE={}".format(role),
+                shell,
+                "-lc",
+                command,
+            ]
+        )
+
+    def _configure_agent_pane(
+        self,
+        pane: str,
+        project_id: str,
+        agent_id: str,
+        name: str,
+        output_log: Optional[str] = None,
+    ) -> None:
         title = "mini-cmux:{}:{}".format(name, agent_id[:8])
         self.run("set-option", "-p", "-t", pane, "@mini_cmux_agent_id", agent_id)
         self.run("set-option", "-p", "-t", pane, "@mini_cmux_project_id", project_id)
@@ -175,8 +204,43 @@ class Tmux:
         self.run("select-pane", "-t", pane, "-T", title)
         self.run("set-option", "-w", "-t", pane, "remain-on-exit", "on")
         self.run("set-option", "-w", "-t", pane, "automatic-rename", "off")
+        if output_log:
+            pipe_command = (
+                "while IFS= read -r line; do "
+                "case \"$line\" in "
+                "*AGENT_STATUS=*|*REVIEW_STATUS=*) "
+                "printf '%%s\\n' \"$line\" ;; "
+                "esac; done >> {}"
+            ).format(shlex.quote(output_log))
+            self.run("pipe-pane", "-O", "-t", pane, pipe_command)
         self.run("select-layout", "-t", pane, "tiled", check=False)
-        return pane
+
+    def restart_agent_pane(
+        self,
+        pane: str,
+        project_id: str,
+        agent_id: str,
+        name: str,
+        role: str,
+        cwd: str,
+        command: str,
+        output_log: Optional[str] = None,
+    ) -> None:
+        pane_command = self._agent_command(
+            project_id, agent_id, name, role, command
+        )
+        self.run(
+            "respawn-pane",
+            "-k",
+            "-t",
+            pane,
+            "-c",
+            cwd,
+            pane_command,
+        )
+        self._configure_agent_pane(
+            pane, project_id, agent_id, name, output_log=output_log
+        )
 
     def list_panes(self, session: str) -> List[Dict[str, Any]]:
         result = self.run("list-panes", "-s", "-t", session, "-F", PANE_FORMAT)

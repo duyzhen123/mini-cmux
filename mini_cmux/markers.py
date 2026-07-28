@@ -39,7 +39,7 @@ def interpret_marker(marker: Dict[str, str]) -> Dict[str, str]:
     mapping = {
         "READY": ("ready", "agent_idle"),
         "IDLE": ("idle", "agent_idle"),
-        "WORKING": ("working", ""),
+        "WORKING": ("working", "agent_working"),
         "WAITING_FOR_INPUT": (
             "waiting_for_input",
             "agent_waiting_for_input",

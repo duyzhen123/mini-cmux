@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from . import __version__
@@ -100,6 +101,9 @@ def build_parser() -> argparse.ArgumentParser:
     stop = agents.add_parser("stop", help="close one managed agent pane")
     stop.add_argument("name")
     stop.add_argument("--project")
+    restart = agents.add_parser("restart", help="restart an agent's saved command")
+    restart.add_argument("name")
+    restart.add_argument("--project")
 
     status = commands.add_parser("status", help="reconcile and show current state")
     status.add_argument("--project")
@@ -109,6 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
     events.add_argument("--agent")
     events.add_argument("--follow", action="store_true")
     events.add_argument("--interval", type=float, default=1.0)
+    events.add_argument("--after-seq", type=int)
+    events.add_argument("--cursor-file")
+    events.add_argument("--type", action="append", dest="event_types")
+    events.add_argument("--unread", action="store_true")
+    events.add_argument("--limit", type=int)
 
     wait = commands.add_parser("wait", help="wait for an agent status")
     wait.add_argument("name")
@@ -127,6 +136,44 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--once", action="store_true")
 
     commands.add_parser("repair", help="reconcile stable IDs with current tmux panes")
+
+    hook = commands.add_parser(
+        "hook", help="record a structured lifecycle event from an agent pane"
+    )
+    hook.add_argument("status")
+    hook.add_argument("--agent")
+    hook.add_argument("--project")
+    hook.add_argument("--message")
+    hook.add_argument("--session-id")
+
+    notify = commands.add_parser(
+        "notify", help="record attention and send a native notification"
+    )
+    notify.add_argument("--title", required=True)
+    notify.add_argument("--body", default="")
+    notify.add_argument("--agent")
+    notify.add_argument("--project")
+
+    attention = commands.add_parser(
+        "attention", help="list, acknowledge, or jump to unread attention"
+    )
+    attention_commands = attention.add_subparsers(
+        dest="attention_command", required=True
+    )
+    attention_list = attention_commands.add_parser("list")
+    attention_list.add_argument("--project")
+    attention_list.add_argument("--agent")
+    attention_ack = attention_commands.add_parser("ack")
+    attention_ack.add_argument("--id")
+    attention_ack.add_argument("--agent")
+    attention_ack.add_argument("--project")
+    attention_ack.add_argument("--all", action="store_true")
+    attention_jump = attention_commands.add_parser("jump")
+    attention_jump.add_argument("--project")
+    attention_jump.add_argument("--print-command", action="store_true")
+
+    commands.add_parser("capabilities", help="print supported control-plane features")
+    commands.add_parser("doctor", help="check tmux, Ghostty, and registry readiness")
 
     workflow = commands.add_parser(
         "workflow", help="run the planner/implementer/verifier workflow"
@@ -183,14 +230,44 @@ def _display_events(events: List[Dict[str, Any]], as_json: bool) -> None:
         return
     for event in events:
         print(
-            "{}  {:<24}  {}/{}  {}".format(
+            "{:<6}  {}  {:<24}  {}/{}  {}{}".format(
+                event.get("seq", "-"),
                 event["timestamp"],
                 event["type"],
                 event["project_name"],
                 event.get("agent_name") or "-",
                 event["message"],
+                " [unread]" if event["read_state"] == "unread" else "",
             )
         )
+
+
+def _read_cursor(path_value: Optional[str]) -> Optional[int]:
+    if not path_value:
+        return None
+    path = Path(path_value).expanduser()
+    if not path.exists():
+        return None
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError) as exc:
+        raise MiniCmuxError("Cannot read event cursor {}: {}".format(path, exc))
+
+
+def _write_cursor(path_value: Optional[str], events: List[Dict[str, Any]]) -> None:
+    if not path_value or not events:
+        return
+    path = Path(path_value).expanduser()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(
+            "{}\n".format(max(event.get("seq", 0) for event in events)),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except OSError as exc:
+        raise MiniCmuxError("Cannot update event cursor {}: {}".format(path, exc))
 
 
 def _interactive_attach(
@@ -293,6 +370,16 @@ def execute(args: argparse.Namespace, controller: Controller) -> int:
                 _print_json(agent)
             else:
                 print("{}\t{}".format(agent["name"], agent["status"]))
+        elif args.agent_command == "restart":
+            agent = controller.restart_agent(args.name, args.project)
+            if args.json:
+                _print_json(agent)
+            else:
+                print(
+                    "{}\t{}\t{}".format(
+                        agent["name"], agent["status"], agent["tmux_target"]
+                    )
+                )
         return 0
 
     if args.root_command == "status":
@@ -315,17 +402,45 @@ def execute(args: argparse.Namespace, controller: Controller) -> int:
         return 0
 
     if args.root_command == "events":
-        initial = controller.events(args.project, args.agent)
+        cursor = _read_cursor(args.cursor_file)
+        after_seq = max(
+            value
+            for value in [args.after_seq, cursor, 0]
+            if value is not None
+        )
+        cursor_info = controller.event_cursor_info(after_seq)
+        if cursor_info["gap"]:
+            print(
+                "mini-cmux: event cursor gap; refresh with `mini-cmux status`",
+                file=sys.stderr,
+            )
+        initial = controller.events(
+            args.project,
+            args.agent,
+            after_seq=after_seq,
+            event_types=args.event_types,
+            unread_only=args.unread,
+            limit=args.limit,
+        )
         _display_events(initial, args.json)
+        _write_cursor(args.cursor_file, initial)
+        if initial:
+            after_seq = max(event.get("seq", 0) for event in initial)
         if not args.follow:
             return 0
-        seen = {event["id"] for event in initial}
         while True:
             time.sleep(max(0.1, args.interval))
-            current = controller.events(args.project, args.agent)
-            fresh = [event for event in current if event["id"] not in seen]
+            fresh = controller.events(
+                args.project,
+                args.agent,
+                after_seq=after_seq,
+                event_types=args.event_types,
+                unread_only=args.unread,
+            )
             _display_events(fresh, args.json)
-            seen.update(event["id"] for event in fresh)
+            _write_cursor(args.cursor_file, fresh)
+            if fresh:
+                after_seq = max(event.get("seq", 0) for event in fresh)
 
     if args.root_command == "wait":
         agent = controller.wait(
@@ -356,6 +471,91 @@ def execute(args: argparse.Namespace, controller: Controller) -> int:
         else:
             print("Reconciled registry with tmux ({} new events).".format(len(events)))
         return 0
+
+    if args.root_command == "hook":
+        result = controller.record_hook(
+            args.status,
+            message=args.message,
+            agent_name=args.agent,
+            project_name=args.project,
+            session_id=args.session_id,
+        )
+        if args.json:
+            _print_json(result)
+        else:
+            print(
+                "{}\t{}\tseq={}".format(
+                    result["agent"]["name"],
+                    result["agent"]["status"],
+                    result["event"]["seq"],
+                )
+            )
+        return 0
+
+    if args.root_command == "notify":
+        event = controller.notify(
+            args.title,
+            args.body,
+            agent_name=args.agent,
+            project_name=args.project,
+        )
+        if args.json:
+            _print_json(event)
+        else:
+            print("{}\tseq={}".format(event["type"], event["seq"]))
+        return 0
+
+    if args.root_command == "attention":
+        if args.attention_command == "list":
+            _display_events(
+                controller.attention_events(args.project, args.agent), args.json
+            )
+            return 0
+        if args.attention_command == "ack":
+            changed = controller.acknowledge_events(
+                event_id=args.id,
+                agent_name=args.agent,
+                project_name=args.project,
+                acknowledge_all=args.all,
+            )
+            if args.json:
+                _print_json({"acknowledged": changed})
+            else:
+                print("Acknowledged {} event(s).".format(changed))
+            return 0
+        if args.attention_command == "jump":
+            event = controller.latest_attention(args.project)
+            if event is None:
+                raise MiniCmuxError("No unread attention events")
+            if event.get("agent_id"):
+                result = controller.focus_agent(
+                    event["agent_id"], event["project_id"]
+                )
+                project = result["project"]
+            else:
+                project = controller.get_project(event["project_id"])
+                controller.acknowledge_events(event_id=event["id"])
+            if os.environ.get("TMUX") and not args.print_command:
+                controller.tmux.switch_client(project["tmux_session"])
+                return 0
+            return _interactive_attach(controller, project, args.print_command)
+
+    if args.root_command == "capabilities":
+        _print_json(controller.capabilities())
+        return 0
+
+    if args.root_command == "doctor":
+        report = controller.doctor()
+        if args.json:
+            _print_json(report)
+        else:
+            for check in report["checks"]:
+                print(
+                    "{:<8}  {:<8}  {}".format(
+                        check["name"], check["status"], check["detail"]
+                    )
+                )
+        return 0 if report["ok"] else 1
 
     if args.root_command == "workflow":
         result = WorkflowRunner(controller).run(
