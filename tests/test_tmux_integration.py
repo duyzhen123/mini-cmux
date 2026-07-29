@@ -31,9 +31,15 @@ class TmuxIntegrationTests(unittest.TestCase):
                     "integration",
                     "worker",
                     "implementer",
-                    "printf 'hello\\n'; sleep 0.2; "
+                    "IFS= read -r prompt; printf 'hello\\n'; sleep 0.2; "
                     "printf 'AGENT_STATUS=DONE\\n'",
                 )
+                controller.send_text(
+                    "worker",
+                    "Finish with AGENT_STATUS=DONE, but do not report it yet.",
+                    "integration",
+                )
+                controller.send_key("worker", "enter", "integration")
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
                     controller.reconcile()
@@ -52,6 +58,7 @@ class TmuxIntegrationTests(unittest.TestCase):
                 )
                 self.assertIn("AGENT_STATUS=DONE", piped_output)
                 self.assertNotIn("hello", piped_output)
+                self.assertNotIn("finish with AGENT_STATUS", piped_output)
                 event_types = [
                     event["type"] for event in controller.events("integration")
                 ]
@@ -61,6 +68,12 @@ class TmuxIntegrationTests(unittest.TestCase):
 
                 restarted = controller.restart_agent("worker", "integration")
                 self.assertEqual(restarted["status"], "running")
+                controller.send_text(
+                    "worker",
+                    "Now do the work and finish with AGENT_STATUS=DONE.",
+                    "integration",
+                )
+                controller.send_key("worker", "enter", "integration")
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
                     controller.reconcile()

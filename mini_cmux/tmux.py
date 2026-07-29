@@ -208,7 +208,7 @@ class Tmux:
             pipe_command = (
                 "while IFS= read -r line; do "
                 "case \"$line\" in "
-                "*AGENT_STATUS=*|*REVIEW_STATUS=*) "
+                "AGENT_STATUS=*|REVIEW_STATUS=*) "
                 "printf '%%s\\n' \"$line\" ;; "
                 "esac; done >> {}"
             ).format(shlex.quote(output_log))

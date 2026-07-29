@@ -7,7 +7,10 @@ from typing import Dict, List, Optional
 
 
 MARKER = re.compile(
-    r"(?<![A-Z0-9_])(AGENT_STATUS|REVIEW_STATUS)=([A-Z][A-Z0-9_]*)"
+    r"^(AGENT_STATUS|REVIEW_STATUS)=([A-Z][A-Z0-9_]*)$"
+)
+ANSI_ESCAPE = re.compile(
+    r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))"
 )
 
 
@@ -18,7 +21,11 @@ def last_marker(output: str) -> Optional[Dict[str, str]]:
 
 def all_markers(output: str) -> List[Dict[str, str]]:
     markers = []
-    for match in MARKER.finditer(output):
+    for line in output.splitlines():
+        clean_line = ANSI_ESCAPE.sub("", line).strip()
+        match = MARKER.fullmatch(clean_line)
+        if not match:
+            continue
         markers.append(
             {
                 "kind": match.group(1),

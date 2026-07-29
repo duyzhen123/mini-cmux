@@ -289,6 +289,17 @@ mini-cmux capabilities
 The detailed comparison with upstream cmux is in
 [`docs/CMUX_CONTROL_PLANE_AUDIT.md`](docs/CMUX_CONTROL_PLANE_AUDIT.md).
 
+For team design, orchestration, communication, notifications, recovery,
+dynamic workers, teardown, and a runnable demonstration, see
+[`docs/AGENT_TEAMS_GUIDE.md`](docs/AGENT_TEAMS_GUIDE.md).
+
+Run the deterministic three-agent demo without a model or API key:
+
+```bash
+./examples/team-demo/run-demo.sh
+./bin/mini-cmux cleanup --project team-demo
+```
+
 ## Environment controls
 
 ```text
