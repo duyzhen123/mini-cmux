@@ -212,6 +212,13 @@ session-123:task-456:completed:3
 
 Do not generate a new ID for each retry. A new ID means a new logical event.
 
+In the current release, the task text embedded in an event ID is
+adapter-owned metadata. mini-cmux deduplicates the event, but it does not yet
+validate a durable `task_id` and `attempt` against an assignment record.
+Therefore event-ID naming alone does not prevent a delayed event from old work
+from advancing newer worker status. The target task-attempt protocol is
+specified in [`FLEET_ORCHESTRATION.md`](FLEET_ORCHESTRATION.md).
+
 Idempotency receipts are bounded like the registry event tail. They protect
 normal delivery retries while the referenced event remains in the retained
 2,000-event snapshot. Long-term audit consumers should also deduplicate using
@@ -470,6 +477,12 @@ shell or Python controller implements arbitrary dependency graphs.
 ## 13. Controller rules for arbitrary teams
 
 A controller should maintain a routing table:
+
+For a mature dynamic fleet, this controller must be deterministic code rather
+than a model conversation. A model may author the plan or dependency graph,
+but the controller owns assignment, retries, barriers, and completion. See
+[`FLEET_ORCHESTRATION.md`](FLEET_ORCHESTRATION.md) for the task-attempt and
+capability-allocation design.
 
 | Incoming event | Preconditions | Action |
 | --- | --- | --- |

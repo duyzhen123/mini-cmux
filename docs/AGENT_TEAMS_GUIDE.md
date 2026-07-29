@@ -22,6 +22,12 @@ deterministic Python workers and requires no model.
 See [`WORKER_ADAPTERS.md`](WORKER_ADAPTERS.md) for the vendor-neutral worker
 contract and reliable hook-adapter specification.
 
+For dynamic fleet scheduling, task-attempt correlation, worker discovery,
+capability requests, and the boundary between registered workers and native
+conversation subagents, see
+[`FLEET_ORCHESTRATION.md`](FLEET_ORCHESTRATION.md). That document clearly
+separates the current release from the target architecture.
+
 The examples use the installed `mini-cmux` command. From a source checkout,
 replace it with `./bin/mini-cmux`, or install the command with:
 
@@ -339,6 +345,14 @@ implementation reports completion.
 Manual control is useful when the team shape or handoff logic does not match
 the built-in workflow:
 
+> **Current limitation:** `wait` observes worker status, not a task attempt.
+> Reusing a worker that already reached the requested status can therefore
+> reuse stale state, and a delayed old hook can be attributed to newer work.
+> Use unique assignment IDs and artifacts, validate artifacts after each wait,
+> and do not treat this manual pattern as production-grade task
+> synchronization. See
+> [`FLEET_ORCHESTRATION.md`](FLEET_ORCHESTRATION.md).
+
 ```bash
 mini-cmux agent send planner \
   "Create PLAN.md and finish with AGENT_STATUS=PLAN_READY." \
@@ -434,6 +448,12 @@ Recommended dynamic-team rules:
 6. Escalate ambiguous decisions to a human with `WAITING_FOR_INPUT`.
 7. Avoid allowing multiple agents to commit, rebase, or rewrite shared history
    concurrently unless the project has an explicit Git coordination policy.
+8. Use deterministic code as the scheduler; use a model to propose work, not
+   to own dispatch, retries, or completion.
+9. Describe registered team members as workers and include a fresh roster in
+   every model assignment.
+10. Treat cross-vendor worker creation as a scheduler capability-allocation
+    decision, never as one worker directly spawning another.
 
 ## 9. Events, notifications, and attention
 
@@ -662,6 +682,8 @@ mini-cmux currently does not provide:
 - A Swift or custom terminal UI
 - Automatic Ghostty tab creation or tab-ID management
 - A team manifest parser
+- Task records, attempts, leases, or task-correlated waits
+- Worker capability declarations or deterministic capability allocation
 - Peer-to-peer agent messaging
 - An always-running daemon
 - Arbitrary dependency-graph scheduling

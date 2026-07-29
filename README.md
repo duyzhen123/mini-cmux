@@ -307,6 +307,11 @@ For team design, orchestration, communication, notifications, recovery,
 dynamic workers, teardown, and a runnable demonstration, see
 [`docs/AGENT_TEAMS_GUIDE.md`](docs/AGENT_TEAMS_GUIDE.md).
 
+For the first-principles design of a maintainable dynamic fleet—including
+task attempts, worker discovery, capability allocation, native-subagent
+boundaries, and a staged roadmap—see
+[`docs/FLEET_ORCHESTRATION.md`](docs/FLEET_ORCHESTRATION.md).
+
 For adapting an internal agent CLI, model-backed worker, deterministic job, or
 human shell through a reliable vendor-neutral hook contract, see
 [`docs/WORKER_ADAPTERS.md`](docs/WORKER_ADAPTERS.md).
