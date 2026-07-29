@@ -11,7 +11,16 @@ Ghostty = visible terminal application
 tmux = persistent sessions, windows, panes, PTYs, and processes
 mini-cmux = stable identity, routing, status, events, attention, and workflow
 project files = durable work products and handoff artifacts
+worker = approved agent CLI, internal worker, deterministic job, or human shell
 ```
+
+mini-cmux does not supply model intelligence. Pi and other external coding
+agents are not required dependencies, but autonomous planning or coding
+requires an approved worker implementation somewhere. The included demo uses
+deterministic Python workers and requires no model.
+
+See [`WORKER_ADAPTERS.md`](WORKER_ADAPTERS.md) for the vendor-neutral worker
+contract and reliable hook-adapter specification.
 
 The examples use the installed `mini-cmux` command. From a source checkout,
 replace it with `./bin/mini-cmux`, or install the command with:
@@ -65,7 +74,7 @@ Define these fields for every worker:
 | Project | Isolation and shared working directory | `shop-api` |
 | Name | Stable address used by commands | `backend` |
 | Role | Logical responsibility and tmux placement hint | `implementer` |
-| Command | Long-running interactive agent process | `pi` |
+| Command | Long-running interactive agent process | `approved-agent-cli` |
 | Inputs | Files or messages the worker may consume | `PLAN.md` |
 | Outputs | Files the worker owns | `src/api.py` |
 | Ready signal | Structured terminal marker or hook | `AGENT_STATUS=DONE` |
@@ -140,16 +149,20 @@ Launch three long-running interactive agents:
 ```bash
 mini-cmux agent create shop-api planner \
   --role planner \
-  --command pi
+  --command approved-agent-cli
 
 mini-cmux agent create shop-api implementer \
   --role implementer \
-  --command pi
+  --command approved-agent-cli
 
 mini-cmux agent create shop-api verifier \
   --role verifier \
-  --command pi
+  --command approved-agent-cli
 ```
+
+`approved-agent-cli` is a placeholder. Replace it with a company-approved
+interactive worker. If none exists, use deterministic scripts or human shells;
+mini-cmux alone cannot understand natural-language coding assignments.
 
 The command must remain able to receive prompts through its terminal. A
 one-shot process that immediately exits cannot participate in later handoffs;
@@ -215,9 +228,9 @@ REVIEW_STATUS=GREEN
 REVIEW_STATUS=RED
 ```
 
-Structured markers are the primary source of truth. Process exit is the
-secondary source. Prompt shapes and idle-time guesses are not treated as
-completion.
+Native or wrapper hooks are preferred when a worker can emit them. Exact
+markers are the compatibility path, and process exit is the reliability
+backstop. Prompt shapes and idle-time guesses are not treated as completion.
 
 An agent wrapper can report status without relying on terminal parsing:
 
@@ -226,7 +239,16 @@ mini-cmux hook working --message "Running integration tests"
 mini-cmux hook waiting --message "Need a database migration decision"
 mini-cmux hook completed --message "Implementation and tests finished"
 mini-cmux hook review_green --message "Review passed"
+
+mini-cmux hook completed \
+  --source company-agent \
+  --event-id session-123:task-456:completed:1 \
+  --message "Implementation and tests finished"
 ```
+
+Use one stable event ID for one logical transition. If the adapter retries the
+call, it must reuse that ID; mini-cmux returns the original event without
+duplicating attention or notifications.
 
 Managed panes inherit these environment variables, so hooks know their own
 identity:
@@ -350,19 +372,19 @@ An arbitrary team can be created by adding named workers:
 ```bash
 mini-cmux agent create shop-api backend \
   --role implementer \
-  --command pi
+  --command "approved-agent-cli --profile backend"
 
 mini-cmux agent create shop-api frontend \
   --role implementer \
-  --command pi
+  --command "approved-agent-cli --profile frontend"
 
 mini-cmux agent create shop-api tests \
   --role tester \
-  --command pi
+  --command "exec bash"
 
 mini-cmux agent create shop-api security \
   --role reviewer \
-  --command pi
+  --command "exec bash"
 
 mini-cmux agent create shop-api observer \
   --role logs \
@@ -618,7 +640,8 @@ Before dispatch:
 
 During execution:
 
-- Treat markers and hooks as lifecycle truth.
+- Prefer idempotent hooks for lifecycle truth and use exact markers as the
+  compatibility fallback.
 - Treat files and Git diffs as work-product truth.
 - Inspect unread attention rather than scraping every pane.
 - Pause and route human decisions explicitly.

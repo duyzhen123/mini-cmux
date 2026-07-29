@@ -30,6 +30,7 @@ def default_state() -> Dict[str, Any]:
         "projects": {},
         "agents": {},
         "events": [],
+        "hook_receipts": {},
     }
 
 
@@ -72,6 +73,7 @@ class Registry:
         state.setdefault("projects", {})
         state.setdefault("agents", {})
         state.setdefault("events", [])
+        state.setdefault("hook_receipts", {})
         state.setdefault("stream_id", str(uuid.uuid4()))
         next_sequence = 1
         for event in state["events"]:

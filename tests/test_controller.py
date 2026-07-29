@@ -256,6 +256,27 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(changed, 2)
         self.assertEqual(self.controller.attention_events("demo", "worker"), [])
 
+        first = self.controller.record_hook(
+            "plan_ready",
+            message="Plan ready",
+            agent_name="worker",
+            project_name="demo",
+            source="company-agent",
+            source_event_id="native-123:plan-ready:1",
+        )
+        repeated = self.controller.record_hook(
+            "plan_ready",
+            message="Plan ready",
+            agent_name="worker",
+            project_name="demo",
+            source="company-agent",
+            source_event_id="native-123:plan-ready:1",
+        )
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(repeated["duplicate"])
+        self.assertEqual(first["event"]["id"], repeated["event"]["id"])
+        self.assertEqual(repeated["agent"]["status"], "plan_ready")
+
         pane = self.tmux.sessions[project["tmux_session"]]["panes"][
             agent["tmux_pane"]
         ]
@@ -268,6 +289,8 @@ class ControllerTests(unittest.TestCase):
     def test_capabilities_doctor_and_cursor_gap(self):
         capabilities = self.controller.capabilities()
         self.assertTrue(capabilities["features"]["stable_agent_ids"])
+        self.assertTrue(capabilities["features"]["hook_idempotency"])
+        self.assertTrue(capabilities["features"]["vendor_neutral_workers"])
         self.assertFalse(capabilities["features"]["custom_terminal_ui"])
         doctor = self.controller.doctor()
         self.assertTrue(doctor["ok"])

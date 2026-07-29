@@ -6,6 +6,19 @@ from pathlib import Path
 
 
 class TeamDemoTests(unittest.TestCase):
+    def test_example_shell_scripts_parse(self):
+        root = Path(__file__).resolve().parent.parent
+        for script in [
+            root / "examples" / "team-demo" / "run-demo.sh",
+            root / "examples" / "hook-adapter" / "run-job-with-hooks.sh",
+        ]:
+            subprocess.run(
+                ["bash", "-n", str(script)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
     def test_planner_implementer_verifier_handoff(self):
         script = (
             Path(__file__).resolve().parent.parent

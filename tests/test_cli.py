@@ -54,9 +54,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(events.after_seq, 4)
         self.assertEqual(events.event_types, ["agent_completed"])
         hook = build_parser().parse_args(
-            ["hook", "waiting", "--agent", "worker", "--project", "demo"]
+            [
+                "hook",
+                "waiting",
+                "--agent",
+                "worker",
+                "--project",
+                "demo",
+                "--source",
+                "company-agent",
+                "--event-id",
+                "session-1:waiting:1",
+            ]
         )
         self.assertEqual(hook.status, "waiting")
+        self.assertEqual(hook.source, "company-agent")
+        self.assertEqual(hook.event_id, "session-1:waiting:1")
         attention = build_parser().parse_args(
             ["attention", "ack", "--all", "--project", "demo"]
         )

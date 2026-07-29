@@ -145,6 +145,15 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("--project")
     hook.add_argument("--message")
     hook.add_argument("--session-id")
+    hook.add_argument(
+        "--source",
+        default="generic",
+        help="adapter name recorded with the event",
+    )
+    hook.add_argument(
+        "--event-id",
+        help="adapter-owned idempotency key for safe retries",
+    )
 
     notify = commands.add_parser(
         "notify", help="record attention and send a native notification"
@@ -479,15 +488,18 @@ def execute(args: argparse.Namespace, controller: Controller) -> int:
             agent_name=args.agent,
             project_name=args.project,
             session_id=args.session_id,
+            source=args.source,
+            source_event_id=args.event_id,
         )
         if args.json:
             _print_json(result)
         else:
             print(
-                "{}\t{}\tseq={}".format(
+                "{}\t{}\tseq={}{}".format(
                     result["agent"]["name"],
                     result["agent"]["status"],
                     result["event"]["seq"],
+                    "\tduplicate" if result["duplicate"] else "",
                 )
             )
         return 0

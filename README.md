@@ -67,13 +67,13 @@ mini-cmux project create calculator --cwd ~/projects/calculator
 
 mini-cmux agent create calculator planner \
   --role planner \
-  --command pi
+  --command approved-agent-cli
 
 mini-cmux agent create \
   --project calculator \
   --name implementer \
   --role implementer \
-  --command pi
+  --command approved-agent-cli
 
 mini-cmux agent send planner \
   "Read GOAL.md and write PLAN.md. End with AGENT_STATUS=PLAN_READY." \
@@ -86,6 +86,10 @@ mini-cmux wait planner --status plan_ready --project calculator
 mini-cmux agent read planner --lines 100 --project calculator
 mini-cmux agent focus planner --project calculator
 ```
+
+`approved-agent-cli` is a placeholder for the interactive worker approved in
+your environment. mini-cmux does not include a model or coding-agent runtime.
+The deterministic repository demo requires neither.
 
 `--role` defaults to the agent name in the compact form. Planner and
 implementer roles are placed in a `main` tmux window; verifier/reviewer roles
@@ -114,6 +118,7 @@ mini-cmux status [--project PROJECT]
 mini-cmux events [--follow] [--cursor-file PATH] [--after-seq N]
                  [--type TYPE] [--unread] [--project PROJECT] [--agent AGENT]
 mini-cmux hook STATUS [--message TEXT] [--session-id ID]
+               [--source ADAPTER] [--event-id IDEMPOTENCY-KEY]
 mini-cmux notify --title TITLE [--body BODY] [--project PROJECT] [--agent AGENT]
 mini-cmux attention list [--project PROJECT] [--agent AGENT]
 mini-cmux attention ack (--id ID | --agent AGENT | --all) [--project PROJECT]
@@ -150,9 +155,10 @@ REVIEW_STATUS=GREEN
 REVIEW_STATUS=RED
 ```
 
-Explicit markers are the primary source of truth. Process exit is the second
-source. mini-cmux does not treat prompt patterns or idle-time guesses as
-completion.
+Native or wrapper hooks are the preferred source of truth when a worker
+supports them. Exact markers provide a compatibility path, and process exit is
+the reliability backstop. mini-cmux does not treat prompt patterns or
+idle-time guesses as completion.
 
 Managed panes also inherit `MINI_CMUX_PROJECT_ID`, `MINI_CMUX_AGENT_ID`,
 `MINI_CMUX_AGENT_NAME`, and `MINI_CMUX_AGENT_ROLE`. Any agent or hook running in
@@ -163,11 +169,19 @@ mini-cmux hook working --message "Running tests"
 mini-cmux hook waiting --message "Approval required"
 mini-cmux hook completed --message "Implementation finished"
 mini-cmux hook review_green --session-id native-session-123
+
+mini-cmux hook completed \
+  --source company-agent \
+  --event-id native-session-123:task-7:completed:1 \
+  --message "Implementation finished"
 ```
 
 Supported hook statuses are `started`, `running`, `working`, `ready`, `idle`,
-`waiting`, `waiting_for_input`, `done`, `completed`, `failed`, `green`,
-`review_green`, `red`, and `review_red`.
+`plan_ready`, `waiting`, `waiting_for_input`, `done`, `completed`, `failed`,
+`green`, `review_green`, `red`, and `review_red`.
+
+Retries that reuse the same `--source` and `--event-id` are idempotent and do
+not create duplicate events or notifications.
 
 Every important event is written to the registry and JSONL event log. The
 agent's attention flag remains set until `agent focus` acknowledges its
@@ -292,6 +306,10 @@ The detailed comparison with upstream cmux is in
 For team design, orchestration, communication, notifications, recovery,
 dynamic workers, teardown, and a runnable demonstration, see
 [`docs/AGENT_TEAMS_GUIDE.md`](docs/AGENT_TEAMS_GUIDE.md).
+
+For adapting an internal agent CLI, model-backed worker, deterministic job, or
+human shell through a reliable vendor-neutral hook contract, see
+[`docs/WORKER_ADAPTERS.md`](docs/WORKER_ADAPTERS.md).
 
 Run the deterministic three-agent demo without a model or API key:
 

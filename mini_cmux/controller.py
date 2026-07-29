@@ -858,12 +858,26 @@ class Controller:
         agent_name: Optional[str] = None,
         project_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        source: str = "generic",
+        source_event_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         identifier = agent_name or os.environ.get("MINI_CMUX_AGENT_ID")
         project_identifier = project_name or os.environ.get("MINI_CMUX_PROJECT_ID")
         if not identifier:
             raise MiniCmuxError(
                 "hook requires --agent outside a mini-cmux managed pane"
+            )
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", source):
+            raise MiniCmuxError(
+                "hook --source must contain 1-64 letters, digits, '.', '_', or '-'"
+            )
+        if source_event_id is not None and (
+            not source_event_id
+            or len(source_event_id) > 256
+            or any(character in source_event_id for character in "\r\n")
+        ):
+            raise MiniCmuxError(
+                "hook --event-id must be 1-256 characters without newlines"
             )
         state = self.registry.read()
         agent = self._agent_by_name(state, identifier, project_identifier)
@@ -882,6 +896,7 @@ class Controller:
             "running": ("running", "agent_started"),
             "working": ("working", "agent_working"),
             "ready": ("ready", "agent_idle"),
+            "plan_ready": ("plan_ready", "agent_completed"),
             "idle": ("idle", "agent_idle"),
             "waiting_for_input": (
                 "waiting_for_input",
@@ -900,10 +915,32 @@ class Controller:
             )
         agent_status, event_type = event_mapping[normalized]
         emitted: List[Dict[str, Any]] = []
+        duplicate = False
 
         def record(current: Dict[str, Any]) -> Dict[str, Any]:
+            nonlocal duplicate
             current_agent = current["agents"][agent["id"]]
             current_project = current["projects"][project["id"]]
+            receipt_key = (
+                "{}:{}:{}".format(source, current_agent["id"], source_event_id)
+                if source_event_id is not None
+                else None
+            )
+            if receipt_key:
+                existing_event_id = current["hook_receipts"].get(receipt_key)
+                existing_event = next(
+                    (
+                        item
+                        for item in current["events"]
+                        if item["id"] == existing_event_id
+                    ),
+                    None,
+                )
+                if existing_event is not None:
+                    duplicate = True
+                    emitted.append(existing_event)
+                    return dict(current_agent)
+                current["hook_receipts"].pop(receipt_key, None)
             current_agent["status"] = agent_status
             current_agent["last_activity_at"] = utc_now()
             current_agent["updated_at"] = utc_now()
@@ -920,17 +957,28 @@ class Controller:
                     current_project,
                     current_agent,
                     payload={
-                        "source": "hook",
+                        "source": source,
+                        "source_event_id": source_event_id,
                         "status": normalized,
                         "session_id": session_id,
                     },
                 )
             )
+            if receipt_key:
+                receipts = current["hook_receipts"]
+                receipts[receipt_key] = emitted[-1]["id"]
+                for stale_key in list(receipts)[:-2000]:
+                    receipts.pop(stale_key, None)
             return dict(current_agent)
 
         updated = self.registry.mutate(record)
-        self._notify_events(emitted)
-        return {"agent": updated, "event": emitted[0]}
+        if not duplicate:
+            self._notify_events(emitted)
+        return {
+            "agent": updated,
+            "event": emitted[0],
+            "duplicate": duplicate,
+        }
 
     def notify(
         self,
@@ -1062,6 +1110,8 @@ class Controller:
                 "bounded_capture": True,
                 "incremental_output_pipe": True,
                 "structured_hooks": True,
+                "hook_idempotency": True,
+                "vendor_neutral_workers": True,
                 "event_sequence": True,
                 "event_cursor": True,
                 "attention_queue": True,
